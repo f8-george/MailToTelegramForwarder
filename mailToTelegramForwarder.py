@@ -140,6 +140,7 @@ class Config:
     imap_push_mode = False
     imap_disconnect = False
     imap_folder = 'INBOX'
+    imap_folders = ['INBOX']
     imap_search = '(UID ${lastUID}:* UNSEEN)'
     imap_mark_as_read = False
     imap_max_length = 2000
@@ -178,6 +179,7 @@ class Config:
             self.imap_push_mode = self.get_config('Mail', 'push_mode', self.imap_push_mode, bool)
             self.imap_disconnect = self.get_config('Mail', 'disconnect', self.imap_disconnect, bool)
             self.imap_folder = self.get_config('Mail', 'folder', self.imap_folder)
+            self.imap_folders = self.parse_list(self.get_config('Mail', 'folders', self.imap_folders))
             self.imap_read_old_mails = self.get_config('Mail', 'read_old_mails', self.imap_read_old_mails)
             self.imap_search = self.get_config('Mail', 'search', self.imap_search)
             self.imap_mark_as_read = self.get_config('Mail', 'mark_as_read', self.imap_mark_as_read, bool)
@@ -242,6 +244,18 @@ class Config:
             raise get_val_error
 
         return value
+    
+    def parse_list(self, folders_input):
+        
+        if isinstance(folders_input, list):
+            folders_list = [str(folder).strip() for folder in folders_input]
+        else:
+            folders_str = str(folders_input)
+            folders_str = folders_str.replace('"', '').replace("'", "")
+            folders_list = [folder.strip() for folder in folders_str.split(',')]
+        
+        folders_list = [folder for folder in folders_list if folder]
+        return folders_list
 
 
 class MailAttachmentType(Enum):
@@ -586,6 +600,8 @@ class Mail:
     mailbox: typing.Optional[imaplib2.IMAP4_SSL] = None
     config: Config
     last_uid: str = ''
+    folders: None
+    mails: None
 
     previous_error = None
 
@@ -638,13 +654,16 @@ class Mail:
             logging.info("Mailboxes:")
             logging.info(mailboxes)
 
-        rv, data = self.mailbox.select(config.imap_folder)
-        if rv == 'OK':
-            logging.info("Processing mailbox...")
-        else:
-            msg = "ERROR: Unable to open mailbox: %s" % str(rv)
-            logging.debug(msg)
-            raise self.MailError(msg)
+    def get_folders(self):
+        self.folders = list()
+        for folder in self.config.imap_folders:
+            print(folder)
+            self.folders.append(Folder(self, folder))
+
+    def poll_folders(self):
+        for folder in self.folders:
+            folder.poll()
+
 
     def is_connected(self):
         if self.mailbox is not None:
@@ -670,77 +689,21 @@ class Mail:
                 pass
             finally:
                 self.mailbox = None
+    
+class Folder:
 
-    @staticmethod
-    def decode_body(msg) -> MailBody:
-        """
-        Get payload from message and return structured body data
-        """
-        html_part = None
-        text_part = None
-        attachments: [MailAttachment] = []
-        images: dict[str, MailAttachment] = {}
-        index: int = 1
+    def __init__(self, mail: Mail, folder: str):
+        self.mail = mail
+        self.mailbox = mail.mailbox
+        self.config = mail.config
+        self.folder = folder
+        self.last_uid = ''
+        self.mails = None
 
-        for part in msg.walk():
-            if part.get_content_type().startswith('multipart/'):
-                continue
-
-            elif part.get_content_type() == 'text/plain':
-                # extract plain text body
-                text_part = part.get_payload(decode=True)
-                encoding = part.get_content_charset()
-                if not encoding:
-                    encoding = 'utf-8'
-                text_part = bytes(text_part).decode(encoding).strip()
-
-            elif part.get_content_type() == 'text/html':
-                # extract HTML body
-                html_part = part.get_payload(decode=True)
-                encoding = part.get_content_charset()
-                if not encoding:
-                    encoding = 'utf-8'
-                html_part = bytes(html_part).decode(encoding).strip()
-
-            elif part.get_content_type() == 'message/rfc822':
-                continue
-
-            elif part.get_content_type() == 'text/calendar':
-                # extract calendar/appointment files
-                attachment = MailAttachment()
-                attachment.idx = index
-                attachment.name = 'invite.ics'
-                attachment.file = part.get_payload(decode=True)
-                attachments.append(attachment)
-                index += 1
-
-            elif part.get_content_charset() is None:
-                if part.get_content_disposition() == 'attachment':
-                    # extract attachments
-                    attachment = MailAttachment()
-                    attachment.idx = index
-                    attachment.set_name(str(part.get_filename()))
-                    attachment.file = part.get_payload(decode=True)
-                    attachments.append(attachment)
-                    index += 1
-
-                elif part.get_content_disposition() == 'inline':
-                    # extract inline images
-                    if part.get_content_type() in ('image/png', 'image/jpeg'):
-                        image = MailAttachment(MailAttachmentType.IMAGE)
-                        image.idx = index
-                        image.set_name(str(part.get_filename()))
-                        image.set_id(part.get('Content-ID', image.name))
-                        image.file = part.get_payload(decode=True)
-                        images[image.id] = image
-                        index += 1
-
-        body = MailBody()
-        body.text = text_part
-        body.html = html_part
-        body.attachments = attachments
-        body.images = images
-        return body
+    def open(self):
+        rv, data = self.mailbox.select(self.folder)
+        if rv != 'OK':
+            raise self.mail.MailError(f"Unable to open mailbox: {rv}")
 
     def get_last_uid(self) -> str:
         """
@@ -751,7 +714,91 @@ class Mail:
             logging.info("No messages found!")
             return ''
         return self.config.tool.binary_to_string(data[0])
+    
+    def search_mails(self) -> [MailData]:
+        """
+        Search mail on remote IMAP server and return list of parsed mails.
+        """
+        if self.last_uid is None or self.last_uid == '':
+            self.last_uid = self.get_last_uid()
+            logging.info("Most recent UID: '%s'" % self.last_uid)
 
+        # build IMAP search string
+        search_string = self.config.imap_search
+        if not search_string:
+            search_string = "(UID %s:* UNSEEN)" % str(self.last_uid)
+        else:
+            search_string = re.sub(r'\${lastUID}', str(self.last_uid), search_string, flags=re.IGNORECASE)
+
+        if re.match(r'.*\bUID\b\s*:.*', search_string) and self.last_uid == '':
+            # empty mailbox
+            return
+
+        try:
+            rv, data = self.mailbox.uid('search', None, search_string)
+            if rv != 'OK':
+                logging.info("No messages found!")
+                return
+
+        except imaplib2.IMAP4_SSL.error as search_error:
+            error_msgs = [self.config.tool.binary_to_string(arg) for arg in search_error.args]
+            msg = "Search with '%s' returned: %s" % (search_string, ', '.join(error_msgs))
+            if msg != self.previous_error:
+                logging.error(msg)
+            self.previous_error = msg
+            self.disconnect()
+            raise self.MailError(msg)
+
+        except Exception as search_ex:
+            msg = ', '.join(map(str, search_ex.args))
+            logging.critical("Cannot search mail: %s" % msg)
+            self.disconnect()
+            return self.MailError(msg)
+
+        mails = []
+        if self.config.imap_read_old_mails and not self.config.imap_read_old_mails_processed:
+            # ignore current/max UID during first loop
+            max_uid = ''
+            # don't repeat this on next loops
+            self.config.imap_read_old_mails = False
+            logging.info("Ignore most recent UID '%s', as old mails have to be processed first..." % self.last_uid)
+        else:
+            max_uid = self.last_uid
+            if not self.config.imap_read_old_mails_processed:
+                self.config.imap_read_old_mails_processed = True
+                logging.info("Reading mails having UID more recent than '%s', using search: '%s'"
+                             % (self.last_uid, search_string))
+
+        for cur_uid in sorted(data[0].split()):
+            current_uid = self.config.tool.binary_to_string(cur_uid)
+
+            try:
+                rv, data = self.mailbox.uid('fetch', cur_uid, '(RFC822)')
+                if rv != 'OK':
+                    logging.error("ERROR getting message: %s" % current_uid)
+                    return
+                
+                msg_raw = data[0][1]
+                mail = self.parse_mail(current_uid, msg_raw)
+                if mail is None:
+                    logging.error("Can't parse mail with UID: '%s'" % current_uid)
+                else:
+                    logging.info("Parsed mail with UID '%s': '%s'" % (current_uid, mail.mail_subject))
+                    mails.append(mail)
+
+            except Exception as mail_error:
+                logging.critical("Cannot process mail with UID '%s': %s" % (current_uid,
+                                                                            ', '.join(map(str, mail_error.args))))
+
+            finally:
+                # remember new UID for next loop
+                max_uid = current_uid
+
+        if len(mails) > 0:
+            self.last_uid = max_uid
+            logging.info("Got %i new mail(s) to forward, using most recent UID: '%s'" % (len(mails), self.last_uid))
+        return mails
+    
     def parse_mail(self, uid, mail) -> (MailData, None):
         """
         parse data from mail like subject, body and attachments and return structured mail data
@@ -891,90 +938,82 @@ class Mail:
             else:
                 logging.critical("Cannot parse mail: %s" % parse_error.__str__())
             return None
-
-    def search_mails(self) -> [MailData]:
+        
+    @staticmethod
+    def decode_body(msg) -> MailBody:
         """
-        Search mail on remote IMAP server and return list of parsed mails.
+        Get payload from message and return structured body data
         """
-        if self.last_uid is None or self.last_uid == '':
-            self.last_uid = self.get_last_uid()
-            logging.info("Most recent UID: '%s'" % self.last_uid)
+        html_part = None
+        text_part = None
+        attachments: [MailAttachment] = []
+        images: dict[str, MailAttachment] = {}
+        index: int = 1
 
-        # build IMAP search string
-        search_string = self.config.imap_search
-        if not search_string:
-            search_string = "(UID %s:* UNSEEN)" % str(self.last_uid)
-        else:
-            search_string = re.sub(r'\${lastUID}', str(self.last_uid), search_string, flags=re.IGNORECASE)
+        for part in msg.walk():
+            if part.get_content_type().startswith('multipart/'):
+                continue
 
-        if re.match(r'.*\bUID\b\s*:.*', search_string) and self.last_uid == '':
-            # empty mailbox
-            return
+            elif part.get_content_type() == 'text/plain':
+                # extract plain text body
+                text_part = part.get_payload(decode=True)
+                encoding = part.get_content_charset()
+                if not encoding:
+                    encoding = 'utf-8'
+                text_part = bytes(text_part).decode(encoding).strip()
 
-        try:
-            rv, data = self.mailbox.uid('search', None, search_string)
-            if rv != 'OK':
-                logging.info("No messages found!")
-                return
+            elif part.get_content_type() == 'text/html':
+                # extract HTML body
+                html_part = part.get_payload(decode=True)
+                encoding = part.get_content_charset()
+                if not encoding:
+                    encoding = 'utf-8'
+                html_part = bytes(html_part).decode(encoding).strip()
 
-        except imaplib2.IMAP4_SSL.error as search_error:
-            error_msgs = [self.config.tool.binary_to_string(arg) for arg in search_error.args]
-            msg = "Search with '%s' returned: %s" % (search_string, ', '.join(error_msgs))
-            if msg != self.previous_error:
-                logging.error(msg)
-            self.previous_error = msg
-            self.disconnect()
-            raise self.MailError(msg)
+            elif part.get_content_type() == 'message/rfc822':
+                continue
 
-        except Exception as search_ex:
-            msg = ', '.join(map(str, search_ex.args))
-            logging.critical("Cannot search mail: %s" % msg)
-            self.disconnect()
-            return self.MailError(msg)
+            elif part.get_content_type() == 'text/calendar':
+                # extract calendar/appointment files
+                attachment = MailAttachment()
+                attachment.idx = index
+                attachment.name = 'invite.ics'
+                attachment.file = part.get_payload(decode=True)
+                attachments.append(attachment)
+                index += 1
 
-        mails = []
-        if self.config.imap_read_old_mails and not self.config.imap_read_old_mails_processed:
-            # ignore current/max UID during first loop
-            max_uid = ''
-            # don't repeat this on next loops
-            self.config.imap_read_old_mails = False
-            logging.info("Ignore most recent UID '%s', as old mails have to be processed first..." % self.last_uid)
-        else:
-            max_uid = self.last_uid
-            if not self.config.imap_read_old_mails_processed:
-                self.config.imap_read_old_mails_processed = True
-                logging.info("Reading mails having UID more recent than '%s', using search: '%s'"
-                             % (self.last_uid, search_string))
+            elif part.get_content_charset() is None:
+                if part.get_content_disposition() == 'attachment':
+                    # extract attachments
+                    attachment = MailAttachment()
+                    attachment.idx = index
+                    attachment.set_name(str(part.get_filename()))
+                    attachment.file = part.get_payload(decode=True)
+                    attachments.append(attachment)
+                    index += 1
 
-        for cur_uid in sorted(data[0].split()):
-            current_uid = self.config.tool.binary_to_string(cur_uid)
+                elif part.get_content_disposition() == 'inline':
+                    # extract inline images
+                    if part.get_content_type() in ('image/png', 'image/jpeg'):
+                        image = MailAttachment(MailAttachmentType.IMAGE)
+                        image.idx = index
+                        image.set_name(str(part.get_filename()))
+                        image.set_id(part.get('Content-ID', image.name))
+                        image.file = part.get_payload(decode=True)
+                        images[image.id] = image
+                        index += 1
 
-            try:
-                rv, data = self.mailbox.uid('fetch', cur_uid, '(RFC822)')
-                if rv != 'OK':
-                    logging.error("ERROR getting message: %s" % current_uid)
-                    return
-
-                msg_raw = data[0][1]
-                mail = self.parse_mail(current_uid, msg_raw)
-                if mail is None:
-                    logging.error("Can't parse mail with UID: '%s'" % current_uid)
-                else:
-                    logging.info("Parsed mail with UID '%s': '%s'" % (current_uid, mail.mail_subject))
-                    mails.append(mail)
-
-            except Exception as mail_error:
-                logging.critical("Cannot process mail with UID '%s': %s" % (current_uid,
-                                                                            ', '.join(map(str, mail_error.args))))
-
-            finally:
-                # remember new UID for next loop
-                max_uid = current_uid
-
-        if len(mails) > 0:
-            self.last_uid = max_uid
-            logging.info("Got %i new mail(s) to forward, using most recent UID: '%s'" % (len(mails), self.last_uid))
-        return mails
+        body = MailBody()
+        body.text = text_part
+        body.html = html_part
+        body.attachments = attachments
+        body.images = images
+        return body
+    
+    def poll(self):
+        logging.info(f'polling folder {self.folder}')
+        self.open()
+        self.mails = self.search_mails()
 
 
 class SystemdHandler(logging.Handler):
@@ -1034,17 +1073,20 @@ async def main_async():
     last_try = time.time()
     tool = Tool()
     sys_handler.tool = tool
+
     try:
         config = Config(tool, cmd_args)
         sys_handler.mask_error_data = tool.mask_error_data
         tg_bot = TelegramBot(config)
         mailbox = Mail(config)
+        mailbox.get_folders()
 
         # Keep polling
         while True:
             try:
                 if mailbox is None:
                     mailbox = Mail(config)
+                    mailbox.get_folders()
                 else:
                     if not mailbox.is_connected():  # reconnect on error (broken connection)
                         if last_try + 60 < time.time():
@@ -1058,15 +1100,16 @@ async def main_async():
                             time.sleep(20)
                             continue
 
-                mails = mailbox.search_mails()
+                mailbox.poll_folders()
 
                 if config.imap_disconnect:
                     # if not reuse previous connection
                     mailbox.disconnect()
 
                 # send mail data via TG bot
-                if mails is not None and len(mails) > 0:
-                    await tg_bot.send_message(mails)
+                for folder in mailbox.folders:
+                    if folder.mails is not None and len(folder.mails) > 0:
+                        await tg_bot.send_message(folder.mails)
 
                 if config.imap_push_mode:
                     logging.info("IMAP IDLE mode")
