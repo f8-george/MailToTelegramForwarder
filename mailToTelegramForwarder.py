@@ -32,6 +32,12 @@ try:
     import email
     from email.header import Header, decode_header, make_header
     from enum import Enum
+
+    from telegram.error import TelegramError
+    from telegram.ext import Application
+    from telegram.constants import ParseMode
+    import asyncio
+
 except ImportError as import_error:
     logging.critical(import_error.__class__.__name__ + ": " + import_error.args[0])
     sys.exit(2)
@@ -54,7 +60,7 @@ with warnings.catch_warnings(record=True) as w:
     # Cause all warnings to always be triggered.
     warnings.simplefilter("always")
 
-    from telegram.utils import helpers
+    from telegram import helpers
     import telegram
 
     # Ignore not supported warnings
@@ -440,13 +446,17 @@ class TelegramBot:
 
         return tg_msg
 
-    def send_message(self, mails: [MailData]):
+    async def send_message(self, mails: [MailData]):
         """
         Send mail data over Telegram API to chat/user.
         """
         try:
-            bot: telegram.Bot = telegram.Bot(self.config.tg_bot_token)
-            tg_chat: telegram.Chat = bot.get_chat(self.config.tg_forward_to_chat_id)
+            # bot: telegram.Bot = telegram.Bot(self.config.tg_bot_token)
+            # tg_chat: telegram.Chat = await bot.get_chat(self.config.tg_forward_to_chat_id)
+
+            application = Application.builder().token(self.config.tg_bot_token).build()
+            bot = application.bot
+            tg_chat = await bot.get_chat(self.config.tg_forward_to_chat_id)
 
             # get chat title
             tg_chat_title = tg_chat.full_name
@@ -458,11 +468,11 @@ class TelegramBot:
             for mail in mails:
                 try:
                     if self.config.tg_markdown_version == 2:
-                        parser = telegram.ParseMode.MARKDOWN_V2
+                        parser = ParseMode.MARKDOWN_V2
                     else:
-                        parser = telegram.ParseMode.MARKDOWN
+                        parser = ParseMode.MARKDOWN
                     if mail.type == MailDataType.HTML:
-                        parser = telegram.ParseMode.HTML
+                        parser = ParseMode.HTML
 
                     if self.config.tg_forward_mail_content or not self.config.tg_forward_attachment:
                         # send mail content (summary)
@@ -476,7 +486,7 @@ class TelegramBot:
 
                             if self.config.tg_forward_embedded_images:
                                 title = '%i. %s: %s' % (image_no, mail.mail_subject, image.get_title())
-                                doc_message: telegram.Message = bot.send_photo(
+                                doc_message: telegram.Message = await bot.send_photo(
                                     chat_id=self.config.tg_forward_to_chat_id,
                                     parse_mode=parser,
                                     caption=title,
@@ -501,7 +511,7 @@ class TelegramBot:
                                 '<a href="%s">🖼 %s</a>' % (src, alt)
                             )
 
-                        tg_message = bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
+                        tg_message = await bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
                                                       parse_mode=parser,
                                                       text=message,
                                                       disable_web_page_preview=False)
@@ -522,7 +532,7 @@ class TelegramBot:
                                     text=attachment.name, version=self.config.tg_markdown_version)
                                 caption = '*' + subject + '*:\n' + file_name
 
-                            tg_message = bot.send_document(chat_id=self.config.tg_forward_to_chat_id,
+                            tg_message = await bot.send_document(chat_id=self.config.tg_forward_to_chat_id,
                                                            parse_mode=parser,
                                                            caption=caption,
                                                            document=attachment.file,
@@ -533,14 +543,14 @@ class TelegramBot:
                                          % (attachment.name, tg_message.message_id,
                                             tg_chat_title, str(self.config.tg_forward_to_chat_id)))
 
-                except telegram.TelegramError as tg_mail_error:
+                except TelegramError as tg_mail_error:
                     msg = "❌ Failed to send Telegram message (UID: %s) to '%s': %s" \
                           % (mail.uid, str(self.config.tg_forward_to_chat_id), tg_mail_error.message)
                     logging.critical(msg)
                     try:
                         # try to send error via telegram, and ignore further errors
-                        bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
-                                         parse_mode=telegram.ParseMode.MARKDOWN_V2,
+                        await bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
+                                         parse_mode=ParseMode.MARKDOWN_V2,
                                          text=telegram.utils.helpers.escape_markdown(msg, version=2),
                                          disable_web_page_preview=False)
                     finally:
@@ -553,14 +563,14 @@ class TelegramBot:
                     logging.critical(msg)
                     try:
                         # try to send error via telegram, and ignore further errors
-                        bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
-                                         parse_mode=telegram.ParseMode.MARKDOWN_V2,
+                        await bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
+                                         parse_mode=ParseMode.MARKDOWN_V2,
                                          text=telegram.utils.helpers.escape_markdown(msg, version=2),
                                          disable_web_page_preview=False)
                     finally:
                         pass
 
-        except telegram.TelegramError as tg_error:
+        except TelegramError as tg_error:
             logging.critical("Failed to send Telegram message: %s" % tg_error.message)
             return False
 
@@ -736,7 +746,7 @@ class Mail:
         """
         get UID of most recent mail
         """
-        rv, data = self.mailbox.uid('search', '', 'UID *')
+        rv, data = self.mailbox.uid('search', None, 'UID *')
         if rv != 'OK':
             logging.info("No messages found!")
             return ''
@@ -817,7 +827,7 @@ class Mail:
                             content = re.sub(r'<(\s*\w*(\s*[^>]*?)?(</[^>]*)?)?$', '', content)
                         else:
                             # remove last "\"
-                            content = re.sub(r'\\*$', '', content)
+                            content = re.sub(r'\\*$', None, content)
                         content += "... (first " + str(max_len) + " characters)"
 
             # attachment summary
@@ -902,7 +912,7 @@ class Mail:
             return
 
         try:
-            rv, data = self.mailbox.uid('search', '', search_string)
+            rv, data = self.mailbox.uid('search', None, search_string)
             if rv != 'OK':
                 logging.info("No messages found!")
                 return
@@ -1001,7 +1011,7 @@ class SystemdHandler(logging.Handler):
                 print("ERROR: SystemdHandler.emit failed with: " + emit_error.__str__())
 
 
-def main():
+async def main_async():
     """
         Run the main program
     """
@@ -1056,7 +1066,7 @@ def main():
 
                 # send mail data via TG bot
                 if mails is not None and len(mails) > 0:
-                    tg_bot.send_message(mails)
+                    await tg_bot.send_message(mails)
 
                 if config.imap_push_mode:
                     logging.info("IMAP IDLE mode")
@@ -1101,5 +1111,7 @@ def main():
             mailbox.disconnect()
         logging.info('Mail to Telegram Forwarder stopped!')
 
+def main():
+    asyncio.run(main_async())
 
 main()
