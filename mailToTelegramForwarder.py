@@ -542,7 +542,7 @@ class TelegramBot:
                                 file_name = attachment.name
                                 caption = '<b>' + subject + '</b>:\n' + file_name
                             else:
-                                file_name = telegram.utils.helpers.escape_markdown(
+                                file_name = helpers.escape_markdown(
                                     text=attachment.name, version=self.config.tg_markdown_version)
                                 caption = '*' + subject + '*:\n' + file_name
 
@@ -565,7 +565,7 @@ class TelegramBot:
                         # try to send error via telegram, and ignore further errors
                         await bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
                                          parse_mode=ParseMode.MARKDOWN_V2,
-                                         text=telegram.utils.helpers.escape_markdown(msg, version=2),
+                                         text=helpers.escape_markdown(msg, version=2),
                                          disable_web_page_preview=False)
                     finally:
                         pass
@@ -579,7 +579,7 @@ class TelegramBot:
                         # try to send error via telegram, and ignore further errors
                         await bot.send_message(chat_id=self.config.tg_forward_to_chat_id,
                                          parse_mode=ParseMode.MARKDOWN_V2,
-                                         text=telegram.utils.helpers.escape_markdown(msg, version=2),
+                                         text=helpers.escape_markdown(msg, version=2),
                                          disable_web_page_preview=False)
                     finally:
                         pass
@@ -834,12 +834,12 @@ class Folder:
                         content = bot.cleanup_html(body.html, body.images)
 
                     elif body.text:
-                        content = telegram.utils.helpers.escape_markdown(text=content,
+                        content = helpers.escape_markdown(text=content,
                                                                          version=self.config.tg_markdown_version)
 
                 else:
                     if body.text:
-                        content = telegram.utils.helpers.escape_markdown(text=content,
+                        content = helpers.escape_markdown(text=content,
                                                                          version=self.config.tg_markdown_version)
 
                     elif body.html:
@@ -890,7 +890,7 @@ class Folder:
                     if message_type == MailDataType.HTML:
                         file_name = attachment.name
                     else:
-                        file_name = telegram.utils.helpers.escape_markdown(
+                        file_name = helpers.escape_markdown(
                             text=attachment.name, version=self.config.tg_markdown_version)
                     attachments_summary += "\n " + str(attachment.idx) + ": " + file_name
 
@@ -909,11 +909,11 @@ class Folder:
                 mail_from = html.escape(mail_from, quote=True)
                 email_text = "<b>From:</b> " + mail_from + "\n<b>Subject:</b> "
             else:
-                subject = telegram.utils.helpers.escape_markdown(text=subject,
+                subject = helpers.escape_markdown(text=subject,
                                                                  version=self.config.tg_markdown_version)
-                mail_from = telegram.utils.helpers.escape_markdown(text=mail_from,
+                mail_from = helpers.escape_markdown(text=mail_from,
                                                                    version=self.config.tg_markdown_version)
-                summary_line = telegram.utils.helpers.escape_markdown(text=summary_line,
+                summary_line = helpers.escape_markdown(text=summary_line,
                                                                       version=self.config.tg_markdown_version)
                 email_text = "*From:* " + mail_from + "\n*Subject:* "
             email_text += subject + summary_line + content + " " + attachments_summary
